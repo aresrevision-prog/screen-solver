@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Screen Solver</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon192.png">
+<meta name="theme-color" content="#14161b">
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 14px; font: 14px/1.5 system-ui, sans-serif; background: #14161b; color: #e8eaf0; max-width: 560px; }
+  h1 { font-size: 17px; margin: 0 0 10px; display: flex; justify-content: space-between; align-items: center; }
+  .row { display: flex; gap: 6px; margin-bottom: 6px; }
+  button { flex: 1; padding: 10px; border: 0; border-radius: 8px; background: #4f8cff; color: #fff; font-weight: 600; cursor: pointer; font: inherit; font-weight: 600; }
+  button.alt { background: #2a2e38; }
+  button.live { background: #1f9d55; }
+  button:disabled { opacity: .5; cursor: default; }
+  #install { flex: 0; padding: 6px 12px; display: none; }
+  textarea, input { width: 100%; box-sizing: border-box; background: #1d2028; color: inherit; border: 1px solid #333846; border-radius: 8px; padding: 8px; font: inherit; }
+  textarea { height: 48px; resize: vertical; margin-bottom: 8px; }
+  #status { color: #9aa3b5; min-height: 20px; margin: 6px 0; }
+  #status.err { color: #ff7a7a; }
+  #out { background: #1d2028; border-radius: 8px; padding: 12px; word-wrap: break-word; }
+  #out:empty { display: none; }
+  code { background: #2a2e38; padding: 1px 4px; border-radius: 4px; }
+  details { margin-top: 14px; color: #9aa3b5; }
+  details input { margin: 6px 0; }
+  a { color: #7aa7ff; }
+  video { display: none; }
+  #crop { position: fixed; inset: 0; background: #000; display: none; z-index: 9; touch-action: none; cursor: crosshair; }
+  #crop canvas { width: 100%; height: 100%; object-fit: contain; display: block; }
+  #box { position: fixed; border: 2px solid #4f8cff; background: rgba(79,140,255,.15); display: none; pointer-events: none; }
+  #tip { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); background: #111; padding: 6px 12px; border-radius: 6px; pointer-events: none; }
+</style>
+</head>
+<body>
+  <h1>Screen Solver <button id="install" class="alt">Install</button></h1>
+  <textarea id="note" placeholder="Optional: e.g. 'just question 3' or 'explain simply'"></textarea>
+  <div class="row"><button id="share" class="alt">Share screen</button></div>
+  <div class="row">
+    <button id="whole" disabled>Solve screen</button>
+    <button id="area" class="alt" disabled>Select area</button>
+  </div>
+  <div id="status">Press "Share screen" and pick your entire screen.</div>
+  <div id="out"></div>
+  <div class="row" style="margin-top:6px"><button id="copy" class="alt" hidden>Copy answer</button></div>
+
+  <details id="settings">
+    <summary>Settings</summary>
+    Gemini API key (free) — get one at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>
+    <input id="key" type="password" placeholder="Paste key">
+    Model
+    <input id="model" placeholder="gemini-2.5-flash">
+    <button id="save">Save</button>
+  </details>
+
+  <video id="vid" muted playsinline></video>
+  <div id="crop"><canvas id="cv"></canvas><div id="box"></div><div id="tip">Drag around the problem · Esc to cancel</div></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const vid = $('vid'), cv = $('cv'), crop = $('crop'), box = $('box');
+let stream = null, lastText = '', deferred = null;
+
+const store = {
+  get: k => { try { return localStorage.getItem(k) || ''; } catch { return ''; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch {} }
+};
+const setStatus = (t, err) => { $('status').textContent = t; $('status').className = err ? 'err' : ''; };
+const busy = b => ['whole', 'area'].forEach(id => $(id).disabled = b || !stream);
+const note = () => $('note').value.trim();
+
+function render(text) {
+  lastText = text;
+  $('out').innerHTML = text.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/^#+\s*(.+)$/gm, '<b>$1</b>').replace(/\n/g, '<br>');
+  $('copy').hidden = false;
+}
+
+$('share').onclick = async () => {
+  if (stream) { stream.getTracks().forEach(t => t.stop()); return; }
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: { displaySurface: 'monitor' }, audio: false });
+    vid.srcObject = stream; await vid.play();
+    stream.getVideoTracks()[0].onended = () => {
+      stream = null; vid.srcObject = null;
+      $('share').textContent = 'Share screen'; $('share').className = 'alt'; busy(false);
+      setStatus('Screen sharing stopped.');
+    };
+    $('share').textContent = 'Stop sharing'; $('share').className = 'live'; busy(false);
+    setStatus('Reading your screen. Switch to your work, come back and press Solve.');
+  } catch { setStatus('Screen share cancelled.', true); }
+};
+
+function grab() {
+  cv.width = vid.videoWidth; cv.height = vid.videoHeight;
+  cv.getContext('2d').drawImage(vid, 0, 0);
+}
+
+$('whole').onclick = () => { grab(); solve(cv.toDataURL('image/png').split(',')[1]); };
+
+// Area select on a frozen frame
+let sx, sy, drag = false, r = null;
+$('area').onclick = () => { grab(); crop.style.display = 'block'; box.style.display = 'none'; };
+const closeCrop = () => { crop.style.display = 'none'; drag = false; };
+const rectOf = e => ({ x: Math.min(sx, e.clientX), y: Math.min(sy, e.clientY), w: Math.abs(e.clientX - sx), h: Math.abs(e.clientY - sy) });
+crop.onpointerdown = e => { sx = e.clientX; sy = e.clientY; drag = true; crop.setPointerCapture(e.pointerId); box.style.display = 'block'; move(e); };
+crop.onpointermove = e => drag && move(e);
+function move(e) { r = rectOf(e); Object.assign(box.style, { left: r.x + 'px', top: r.y + 'px', width: r.w + 'px', height: r.h + 'px' }); }
+crop.onpointerup = e => {
+  if (!drag) return; r = rectOf(e); closeCrop();
+  if (r.w < 5 || r.h < 5) return setStatus('Cancelled.');
+  // map screen rect -> image pixels (canvas is object-fit: contain)
+  const b = cv.getBoundingClientRect(), s = Math.min(b.width / cv.width, b.height / cv.height);
+  const ox = b.left + (b.width - cv.width * s) / 2, oy = b.top + (b.height - cv.height * s) / 2;
+  let x = (r.x - ox) / s, y = (r.y - oy) / s, w = r.w / s, h = r.h / s;
+  x = Math.max(0, x); y = Math.max(0, y); w = Math.min(w, cv.width - x); h = Math.min(h, cv.height - y);
+  if (w < 2 || h < 2) return setStatus('Cancelled.');
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  c.getContext('2d').drawImage(cv, x, y, w, h, 0, 0, w, h);
+  solve(c.toDataURL('image/png').split(',')[1]);
+};
+addEventListener('keydown', e => { if (e.key === 'Escape' && crop.style.display === 'block') { closeCrop(); setStatus('Cancelled.'); } });
+
+async function solve(b64) {
+  const key = store.get('key'), model = store.get('model') || 'gemini-2.5-flash';
+  if (!key) { $('settings').open = true; return setStatus('Add your free Gemini API key in Settings first.', true); }
+  busy(true); setStatus('Solving…');
+  const prompt = 'Read this screenshot. Find the question(s) or problem(s) on it and solve them. ' +
+    'For each: give the final answer first in bold, then short step-by-step working. Be concise.' +
+    (note() ? '\nExtra instruction: ' + note() : '');
+  try {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: 'image/png', data: b64 } }] }] })
+    });
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error?.message || 'HTTP ' + res.status);
+    const text = (j.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('').trim() || 'No answer returned.';
+    store.set('last', text); render(text); setStatus('Done.');
+  } catch (e) { setStatus('AI error: ' + e.message, true); }
+  busy(false);
+}
+
+$('copy').onclick = () => navigator.clipboard.writeText(lastText).then(() => setStatus('Copied.'));
+$('save').onclick = () => {
+  store.set('key', $('key').value.trim()); store.set('model', $('model').value.trim() || 'gemini-2.5-flash');
+  setStatus('Saved.'); $('settings').open = false;
+};
+
+// Install button
+addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferred = e; $('install').style.display = 'block'; });
+$('install').onclick = async () => { if (!deferred) return; deferred.prompt(); await deferred.userChoice; deferred = null; $('install').style.display = 'none'; };
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+
+$('key').value = store.get('key'); $('model').value = store.get('model') || 'gemini-2.5-flash';
+if (!store.get('key')) $('settings').open = true;
+if (store.get('last')) render(store.get('last'));
+</script>
+</body>
+</html>
