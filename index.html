@@ -49,6 +49,7 @@
     <button id="whole" disabled>Solve screen</button>
     <button id="area" class="alt" disabled>Select area</button>
   </div>
+  <div class="row"><button id="auto" class="alt">Auto: OFF</button></div>
   <div id="status">Press "Share screen" and pick your entire screen.</div>
   <div id="out"></div>
   <div class="row" style="margin-top:6px"><button id="copy" class="alt" hidden>Copy answer</button></div>
@@ -69,7 +70,8 @@ const store = {
   set: (k, v) => { try { localStorage.setItem(k, v); } catch {} }
 };
 const setStatus = (t, err) => { $('status').textContent = t; $('status').className = err ? 'err' : ''; };
-const busy = b => ['whole', 'area'].forEach(id => $(id).disabled = b || !stream);
+let solving = false;
+const busy = b => { solving = b; ['whole', 'area'].forEach(id => $(id).disabled = b || !stream); };
 const note = () => $('note').value.trim();
 
 function render(text) {
@@ -87,7 +89,7 @@ $('share').onclick = async () => {
     stream = await navigator.mediaDevices.getDisplayMedia({ video: { displaySurface: 'monitor' }, audio: false });
     vid.srcObject = stream; await vid.play();
     stream.getVideoTracks()[0].onended = () => {
-      stream = null; vid.srcObject = null;
+      stream = null; vid.srcObject = null; auto = false; $('auto').textContent = 'Auto: OFF'; $('auto').className = 'alt';
       $('share').textContent = 'Share screen'; $('share').className = 'alt'; busy(false);
       setStatus('Screen sharing stopped.');
     };
@@ -167,7 +169,7 @@ async function solve(b64) {
   for (const m of models) {
     try {
       const text = await callModel(key, m, prompt, b64);
-      store.set('last', text); render(text); setStatus('Done.'); busy(false);
+      store.set('last', text); render(text); setStatus(auto ? 'Done. Watching for the next question…' : 'Done.'); busy(false); if (auto) rebase();
       return;
     } catch (e) {
       lastErr = e;
@@ -177,7 +179,7 @@ async function solve(b64) {
   }
   setStatus(lastErr.status === 400 || lastErr.status === 403 ? 'Your API key was rejected. Tap "Change API key".' :
     lastErr.status === 429 ? 'Free limit hit for now. Wait a minute and try again.' : 'AI error: ' + lastErr.message, true);
-  busy(false);
+  busy(false); if (auto) rebase();
 }
 
 // Floating always-on-top window (Document Picture-in-Picture)
@@ -195,6 +197,36 @@ $('pop').onclick = async () => {
       $('pop').textContent = 'Float on top'; pip = null;
     });
   } catch (e) { setStatus('Could not open floating window: ' + e.message, true); }
+};
+
+// Auto mode: watch the screen, solve when it changes and settles
+let auto = false, base = null, prev = null, lastSolve = 0;
+const tc = document.createElement('canvas'); tc.width = 96; tc.height = 54;
+function thumb() {
+  if (!vid.videoWidth) return null;
+  const x = tc.getContext('2d', { willReadFrequently: true }); x.drawImage(vid, 0, 0, 96, 54);
+  const d = x.getImageData(0, 0, 96, 54).data, g = new Uint8Array(96 * 54);
+  for (let i = 0; i < g.length; i++) g[i] = (d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2]) / 3;
+  return g;
+}
+const diff = (a, b) => { let t = 0; for (let i = 0; i < a.length; i++) t += Math.abs(a[i] - b[i]); return t / a.length; };
+function autoSolve() { if (grab()) { lastSolve = Date.now(); solve(cv.toDataURL('image/png').split(',')[1]); } }
+function rebase() { setTimeout(() => { base = prev = thumb(); }, 1500); }
+setInterval(() => {
+  if (!auto || !stream || solving) return;
+  const t = thumb(); if (!t) return;
+  if (!base) { base = prev = t; return; }
+  const changed = diff(t, base) > 5, settled = diff(t, prev) < 1.5;
+  prev = t;
+  if (changed && settled && Date.now() - lastSolve > 10000) autoSolve();
+}, 2000);
+$('auto').onclick = async () => {
+  auto = !auto;
+  $('auto').textContent = 'Auto: ' + (auto ? 'ON' : 'OFF'); $('auto').className = auto ? 'live' : 'alt';
+  if (!auto) return setStatus('Auto off.');
+  if (!stream) { await $('share').onclick(); if (!stream) { auto = false; $('auto').textContent = 'Auto: OFF'; $('auto').className = 'alt'; return; } }
+  setStatus('Auto on: solves whenever a new question appears.');
+  base = prev = null; autoSolve();
 };
 
 $('copy').onclick = () => navigator.clipboard.writeText(lastText).then(() => setStatus('Copied.'));
