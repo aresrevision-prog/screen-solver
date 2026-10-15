@@ -43,6 +43,7 @@
     <div id="setupStatus" style="color:#9aa3b5"></div>
   </div>
   <div id="main" style="display:none">
+  <div class="row"><button id="mSolve">Solve</button><button id="mMark" class="alt">Mark</button></div>
   <textarea id="note" placeholder="Optional: e.g. 'just question 3' or 'explain simply'"></textarea>
   <div class="row"><button id="share" class="alt">Share screen</button><button id="pop" class="alt">Float on top</button></div>
   <div class="row">
@@ -160,8 +161,12 @@ async function solve(b64) {
   const key = store.get('key');
   if (!key) return showSetup();
   busy(true); setStatus('Solving…');
-  const prompt = 'Read this screenshot. Find the question(s) or problem(s) on it and solve them. ' +
-    'For each: give the final answer first in bold, then short step-by-step working. Be concise.' +
+  const prompt = (mode === 'mark'
+    ? 'This screenshot shows a student\'s answers to questions. For each question: say whether the student\'s answer is correct (✓) or wrong (✗), ' +
+      'give the correct answer in bold if wrong, and one line of feedback on the mistake. Award marks fairly, including method marks. ' +
+      'Finish with **Total: X / Y** and one line of overall feedback. Be concise.'
+    : 'Read this screenshot. Find the question(s) or problem(s) on it and solve them. ' +
+      'For each: give the final answer first in bold, then short step-by-step working. Be concise.') +
     (note() ? '\nExtra instruction: ' + note() : '');
   let models = JSON.parse(store.get('models') || '[]');
   if (!models.length) models = PREFERRED;
@@ -228,6 +233,17 @@ $('auto').onclick = async () => {
   setStatus('Auto on: solves whenever a new question appears.');
   base = prev = null; autoSolve();
 };
+
+// Mode: solve or mark
+let mode = store.get('mode') || 'solve';
+function setMode(m) {
+  mode = m; store.set('mode', m);
+  $('mSolve').className = m === 'solve' ? '' : 'alt'; $('mMark').className = m === 'mark' ? '' : 'alt';
+  $('whole').textContent = m === 'mark' ? 'Mark screen' : 'Solve screen';
+}
+$('mSolve').onclick = () => setMode('solve');
+$('mMark').onclick = () => setMode('mark');
+setMode(mode);
 
 $('copy').onclick = () => navigator.clipboard.writeText(lastText).then(() => setStatus('Copied.'));
 
