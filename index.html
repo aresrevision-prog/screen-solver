@@ -27,7 +27,7 @@
   details { margin-top: 14px; color: #9aa3b5; }
   details input { margin: 6px 0; }
   a { color: #7aa7ff; }
-  video { display: none; }
+  video { position: fixed; left: 0; top: 0; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
   #crop { position: fixed; inset: 0; background: #000; display: none; z-index: 9; touch-action: none; cursor: crosshair; }
   #crop canvas { width: 100%; height: 100%; object-fit: contain; display: block; }
   #box { position: fixed; border: 2px solid #4f8cff; background: rgba(79,140,255,.15); display: none; pointer-events: none; }
@@ -44,7 +44,7 @@
   </div>
   <div id="main" style="display:none">
   <textarea id="note" placeholder="Optional: e.g. 'just question 3' or 'explain simply'"></textarea>
-  <div class="row"><button id="share" class="alt">Share screen</button></div>
+  <div class="row"><button id="share" class="alt">Share screen</button><button id="pop" class="alt">Float on top</button></div>
   <div class="row">
     <button id="whole" disabled>Solve screen</button>
     <button id="area" class="alt" disabled>Select area</button>
@@ -60,7 +60,7 @@
   <div id="crop"><canvas id="cv"></canvas><div id="box"></div><div id="tip">Drag around the problem · Esc to cancel</div></div>
 
 <script>
-const $ = id => document.getElementById(id);
+const _c = {}; const $ = id => _c[id] || (_c[id] = document.getElementById(id));
 const vid = $('vid'), cv = $('cv'), crop = $('crop'), box = $('box');
 let stream = null, lastText = '', deferred = null;
 
@@ -78,6 +78,7 @@ function render(text) {
     .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/^#+\s*(.+)$/gm, '<b>$1</b>').replace(/\n/g, '<br>');
   $('copy').hidden = false;
+  $('out').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 $('share').onclick = async () => {
@@ -96,15 +97,17 @@ $('share').onclick = async () => {
 };
 
 function grab() {
+  if (!vid.videoWidth) { setStatus('Screen not ready. Stop sharing and share again.', true); return false; }
   cv.width = vid.videoWidth; cv.height = vid.videoHeight;
   cv.getContext('2d').drawImage(vid, 0, 0);
+  return true;
 }
 
-$('whole').onclick = () => { grab(); solve(cv.toDataURL('image/png').split(',')[1]); };
+$('whole').onclick = () => { if (!grab()) return; solve(cv.toDataURL('image/png').split(',')[1]); };
 
 // Area select on a frozen frame
 let sx, sy, drag = false, r = null;
-$('area').onclick = () => { grab(); crop.style.display = 'block'; box.style.display = 'none'; };
+$('area').onclick = () => { if (!grab()) return; if (pip) { pip.close(); } window.focus(); crop.style.display = 'block'; box.style.display = 'none'; };
 const closeCrop = () => { crop.style.display = 'none'; drag = false; };
 const rectOf = e => ({ x: Math.min(sx, e.clientX), y: Math.min(sy, e.clientY), w: Math.abs(e.clientX - sx), h: Math.abs(e.clientY - sy) });
 crop.onpointerdown = e => { sx = e.clientX; sy = e.clientY; drag = true; crop.setPointerCapture(e.pointerId); box.style.display = 'block'; move(e); };
@@ -176,6 +179,23 @@ async function solve(b64) {
     lastErr.status === 429 ? 'Free limit hit for now. Wait a minute and try again.' : 'AI error: ' + lastErr.message, true);
   busy(false);
 }
+
+// Floating always-on-top window (Document Picture-in-Picture)
+let pip = null;
+$('pop').onclick = async () => {
+  if (pip) return pip.close();
+  if (!('documentPictureInPicture' in window)) return setStatus('Floating window needs Chrome 116+.', true);
+  try {
+    pip = await documentPictureInPicture.requestWindow({ width: 380, height: 480 });
+    document.querySelectorAll('style').forEach(st => pip.document.head.appendChild(st.cloneNode(true)));
+    pip.document.body.appendChild($('main'));
+    $('pop').textContent = 'Dock back';
+    pip.addEventListener('pagehide', () => {
+      document.body.insertBefore($('main'), $('vid'));
+      $('pop').textContent = 'Float on top'; pip = null;
+    });
+  } catch (e) { setStatus('Could not open floating window: ' + e.message, true); }
+};
 
 $('copy').onclick = () => navigator.clipboard.writeText(lastText).then(() => setStatus('Copied.'));
 
