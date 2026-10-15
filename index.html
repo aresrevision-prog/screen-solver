@@ -36,6 +36,13 @@
 </head>
 <body>
   <h1>screen-solver <button id="install" class="alt">Install</button></h1>
+  <div id="setup" style="display:none">
+    <p>Paste your free Gemini API key to start. Get one at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> (Create API key → copy).</p>
+    <input id="key" type="password" placeholder="Paste key here" autocomplete="off">
+    <div class="row" style="margin-top:8px"><button id="start">Start</button></div>
+    <div id="setupStatus" style="color:#9aa3b5"></div>
+  </div>
+  <div id="main" style="display:none">
   <textarea id="note" placeholder="Optional: e.g. 'just question 3' or 'explain simply'"></textarea>
   <div class="row"><button id="share" class="alt">Share screen</button></div>
   <div class="row">
@@ -46,14 +53,8 @@
   <div id="out"></div>
   <div class="row" style="margin-top:6px"><button id="copy" class="alt" hidden>Copy answer</button></div>
 
-  <details id="settings">
-    <summary>Settings</summary>
-    Gemini API key (free) — get one at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>
-    <input id="key" type="password" placeholder="Paste key">
-    Model
-    <input id="model" placeholder="gemini-2.5-flash">
-    <button id="save">Save</button>
-  </details>
+  <p style="margin-top:14px"><a href="#" id="changeKey">Change API key</a></p>
+  </div>
 
   <video id="vid" muted playsinline></video>
   <div id="crop"><canvas id="cv"></canvas><div id="box"></div><div id="tip">Drag around the problem · Esc to cancel</div></div>
@@ -124,30 +125,78 @@ crop.onpointerup = e => {
 };
 addEventListener('keydown', e => { if (e.key === 'Escape' && crop.style.display === 'block') { closeCrop(); setStatus('Cancelled.'); } });
 
+const PREFERRED = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash'];
+const API = 'https://generativelanguage.googleapis.com/v1beta/models';
+
+// Ask Google which models this key can use, best first
+async function findModels(key) {
+  const res = await fetch(`${API}?pageSize=200&key=${encodeURIComponent(key)}`);
+  const j = await res.json();
+  if (!res.ok) throw new Error(j.error?.message || 'HTTP ' + res.status);
+  const ok = (j.models || []).filter(m => (m.supportedGenerationMethods || []).includes('generateContent')).map(m => m.name.replace('models/', ''));
+  const list = PREFERRED.filter(m => ok.includes(m));
+  const extra = ok.filter(m => /flash/.test(m) && !/(tts|image|audio|live|embedding|thinking)/.test(m) && !list.includes(m));
+  const all = [...list, ...extra];
+  if (!all.length) throw new Error('No usable models on this key.');
+  return all;
+}
+
+async function callModel(key, model, prompt, b64) {
+  const res = await fetch(`${API}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: 'image/png', data: b64 } }] }] })
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) { const e = new Error(j.error?.message || 'HTTP ' + res.status); e.status = res.status; throw e; }
+  return (j.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('').trim() || 'No answer returned.';
+}
+
 async function solve(b64) {
-  const key = store.get('key'), model = store.get('model') || 'gemini-2.5-flash';
-  if (!key) { $('settings').open = true; return setStatus('Add your free Gemini API key in Settings first.', true); }
+  const key = store.get('key');
+  if (!key) return showSetup();
   busy(true); setStatus('Solving…');
   const prompt = 'Read this screenshot. Find the question(s) or problem(s) on it and solve them. ' +
     'For each: give the final answer first in bold, then short step-by-step working. Be concise.' +
     (note() ? '\nExtra instruction: ' + note() : '');
-  try {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: 'image/png', data: b64 } }] }] })
-    });
-    const j = await res.json();
-    if (!res.ok) throw new Error(j.error?.message || 'HTTP ' + res.status);
-    const text = (j.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('').trim() || 'No answer returned.';
-    store.set('last', text); render(text); setStatus('Done.');
-  } catch (e) { setStatus('AI error: ' + e.message, true); }
+  let models = JSON.parse(store.get('models') || '[]');
+  if (!models.length) models = PREFERRED;
+  let lastErr;
+  for (const m of models) {
+    try {
+      const text = await callModel(key, m, prompt, b64);
+      store.set('last', text); render(text); setStatus('Done.'); busy(false);
+      return;
+    } catch (e) {
+      lastErr = e;
+      if (e.status === 400 && /api key/i.test(e.message)) break; // bad key: no point trying others
+      setStatus('Busy, trying another model…');
+    }
+  }
+  setStatus(lastErr.status === 400 || lastErr.status === 403 ? 'Your API key was rejected. Tap "Change API key".' :
+    lastErr.status === 429 ? 'Free limit hit for now. Wait a minute and try again.' : 'AI error: ' + lastErr.message, true);
   busy(false);
 }
 
 $('copy').onclick = () => navigator.clipboard.writeText(lastText).then(() => setStatus('Copied.'));
-$('save').onclick = () => {
-  store.set('key', $('key').value.trim()); store.set('model', $('model').value.trim() || 'gemini-2.5-flash');
-  setStatus('Saved.'); $('settings').open = false;
+
+// One-time setup
+function showSetup() { $('main').style.display = 'none'; $('setup').style.display = 'block'; $('key').value = store.get('key'); $('key').focus(); }
+function showMain() { $('setup').style.display = 'none'; $('main').style.display = 'block'; }
+$('changeKey').onclick = e => { e.preventDefault(); showSetup(); };
+$('key').onkeydown = e => { if (e.key === 'Enter') $('start').click(); };
+$('start').onclick = async () => {
+  const key = $('key').value.trim().replace(/\s/g, '');
+  if (!key) return $('setupStatus').textContent = 'Paste your key first.';
+  $('start').disabled = true; $('setupStatus').textContent = 'Checking key…';
+  try {
+    const models = await findModels(key);
+    store.set('key', key); store.set('models', JSON.stringify(models));
+    $('setupStatus').textContent = '';
+    showMain(); setStatus('Ready. Press "Share screen" and pick your entire screen.');
+  } catch (e) {
+    $('setupStatus').textContent = 'That key didn\'t work: ' + e.message;
+  }
+  $('start').disabled = false;
 };
 
 // Install button
@@ -155,8 +204,7 @@ addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferred = e;
 $('install').onclick = async () => { if (!deferred) return; deferred.prompt(); await deferred.userChoice; deferred = null; $('install').style.display = 'none'; };
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 
-$('key').value = store.get('key'); $('model').value = store.get('model') || 'gemini-2.5-flash';
-if (!store.get('key')) $('settings').open = true;
+if (store.get('key')) showMain(); else showSetup();
 if (store.get('last')) render(store.get('last'));
 </script>
 </body>
