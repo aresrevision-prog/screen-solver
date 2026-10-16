@@ -53,7 +53,7 @@
   <div class="row"><button id="auto" class="alt">Auto: OFF</button></div>
   <div id="status">Press "Share screen" and pick your entire screen.</div>
   <div id="out"></div>
-  <div class="row" style="margin-top:6px"><button id="copy" class="alt" hidden>Copy answer</button></div>
+  <div class="row" style="margin-top:6px"><button id="copy" class="alt" hidden>Copy answer</button><button id="clear" class="alt">Clear</button></div>
 
   <p style="margin-top:14px"><a href="#" id="changeKey">Change API key</a></p>
   </div>
@@ -244,6 +244,14 @@ function setMode(m) {
 $('mSolve').onclick = () => setMode('solve');
 $('mMark').onclick = () => setMode('mark');
 setMode(mode);
+
+// Clear: wipe answer, note and saved result, reset auto-watch
+$('clear').onclick = () => {
+  lastText = ''; $('out').innerHTML = ''; $('copy').hidden = true; $('note').value = '';
+  store.set('last', '');
+  if (typeof base !== 'undefined') { base = prev = null; }
+  setStatus(stream ? 'Cleared. Ready for the next one.' : 'Cleared. Press "Share screen" to start.');
+};
 
 $('copy').onclick = () => navigator.clipboard.writeText(lastText).then(() => setStatus('Copied.'));
 
